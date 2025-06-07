@@ -1,6 +1,5 @@
 # DRW Crypto Prediction Kaggle Competition  
-> Code base for our submission of the DRW Kaggle Competition for crypto prediction. [`this`](http://kaggle.com/competitions/drw-crypto-market-prediction/team)
- is the link to the competition.
+Code base for our submission of the DRW Kaggle Competition for crypto prediction. [`This`](http://kaggle.com/competitions/drw-crypto-market-prediction/team) is the link to the competition.
 
 ## setup & environment
 
