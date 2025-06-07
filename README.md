@@ -1,9 +1,10 @@
-# python-project-template  
-> a simple template for organizing any python project.
+# DRW Crypto Prediction Kaggle Competition  
+> Code base for our submission of the DRW Kaggle Competition for crypto prediction. [`this`](http://kaggle.com/competitions/drw-crypto-market-prediction/team)
+ is the link to the competition.
 
 ## setup & environment
 
-this template is designed to streamline the setup of any python project. follow these steps to get started:
+Follow these steps to get started when you fork or clone the project:
 
 ### 1. install [`uv`](https://github.com/astral-sh/uv/)
 
@@ -51,5 +52,14 @@ chmod +x git-auto.sh
 
 now you can just do ./git-auto.sh to push commits.
 
-## ready to code  
-you're now all set to start building your project.
+## Goal  
+
+In this competition, the aim is to build a model capable of predicting short-term crypto future price movements using our production feature data alongside publicly available market volume statistics. 
+
+## Description of our approach
+
+We will change here to how we approach to the project.
+
+## News from the competition
+
+There will be some updates here about how we are doing
