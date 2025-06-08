@@ -1,9 +1,7 @@
 import warnings
 
 import lightgbm as lgb
-import numpy as np
 import pandas as pd
-from joblib import dump
 from scipy.stats import pearsonr
 from sklearn.model_selection import TimeSeriesSplit
 
@@ -51,19 +49,22 @@ def preprocess(train, test):
     return X_train, y_train, X_test
 
 
-def train_models(X, y, n_splits=5):
+def train_and_pick_best(X, y, n_splits=5):
     """
-    Train LightGBM models using Time Series Cross-Validation.
+    Train LightGBM models using Time Series Cross-Validation and pick the
+    best model based on Pearson correlation.
     Args:
         X (DataFrame): Feature DataFrame.
         y (Series): Target variable.
         n_splits (int): Number of splits for Time Series Cross-Validation.
     Returns:
-        list: List of trained LightGBM models.
+        LightGBM model: The best model based on validation Pearson correlation.
     """
     tscv = TimeSeriesSplit(n_splits=n_splits)
-    models = []
-    scores = []
+
+    best_model = None
+    best_corr = -9
+    best_fold_id = None
 
     lgb_params = {
         "objective": "regression",
@@ -78,12 +79,7 @@ def train_models(X, y, n_splits=5):
         "verbose": -1,
     }
 
-    callbacks = [
-        lgb.early_stopping(stopping_rounds=200),
-        lgb.log_evaluation(period=100),
-    ]
-
-    for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+    for fold, (train_idx, val_idx) in enumerate(tscv.split(X), 1):
         X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
@@ -96,23 +92,24 @@ def train_models(X, y, n_splits=5):
             num_boost_round=10_000,
             valid_sets=[val_ds],
             valid_names=["val"],
-            callbacks=callbacks,
+            callbacks=[
+                lgb.early_stopping(stopping_rounds=200),
+                lgb.log_evaluation(period=200),
+            ],
         )
 
-        # Validation Pearson correlation
         val_pred = model.predict(X_val, num_iteration=model.best_iteration)
         corr, _ = pearsonr(y_val, val_pred)
-        scores.append(corr)
-        print(f"Fold {fold+1}/{n_splits}  –  Pearson: {corr:.5f}")
+        print(f"Fold {fold}/{n_splits} – Pearson = {corr:.5f}")
 
-        models.append(model)
-        dump(model, f"{output_folder}model_fold{fold+1}.joblib")
+        if corr > best_corr:
+            best_corr, best_model, best_fold_id = corr, model, fold
 
-    print(f"Average Pearson over {n_splits} folds: {np.mean(scores):.5f}")
-    return models
+    print(f"✓ Best fold: {best_fold_id}  (Pearson {best_corr:.5f})")
+    return best_model
 
 
-def predict(models, X_test):
+def predict(best_model, X_test):
     """
     Make predictions using the trained models.
     Args:
@@ -121,11 +118,7 @@ def predict(models, X_test):
     Returns:
         np.ndarray: Average predictions from all models.
     """
-    # Average the predictions from each fold
-    preds = np.mean(
-        [m.predict(X_test, num_iteration=m.best_iteration) for m in models], axis=0
-    )
-    return preds
+    return best_model.predict(X_test, num_iteration=best_model.best_iteration)
 
 
 def save_submission(test_index, preds, out_path=f"{output_folder}submission_lgbm.csv"):
@@ -144,8 +137,8 @@ def save_submission(test_index, preds, out_path=f"{output_folder}submission_lgbm
 def main():
     train, test = load_data()
     X_train, y_train, X_test = preprocess(train, test)
-    models = train_models(X_train, y_train, n_splits=5)
-    preds = predict(models, X_test)
+    best_model = train_and_pick_best(X_train, y_train, n_splits=5)
+    preds = predict(best_model, X_test)
     save_submission(test.index, preds)
 
 
