@@ -1,3 +1,4 @@
+import gc
 import warnings
 
 import lightgbm as lgb
@@ -5,11 +6,16 @@ import pandas as pd
 from scipy.stats import pearsonr
 from sklearn.model_selection import TimeSeriesSplit
 
+from src.utils.light_preprocess import Preprocessor
+from src.utils.util_funcs import compute_feature_importance, save_submission
+
+gc.collect()
 warnings.filterwarnings("ignore", category=UserWarning)
 
 seed = 42
 data_folder = "data/"
 output_folder = "outputs/"
+cols_to_expand = ["bid_qty", "ask_qty", "volume"]
 
 
 def load_data(
@@ -28,7 +34,7 @@ def load_data(
     return train, test
 
 
-def preprocess(train, test):
+def feature_col_filter(train, test):
     """
     Preprocess the training and test datasets.
     Args:
@@ -105,7 +111,7 @@ def train_and_pick_best(X, y, n_splits=5):
         if corr > best_corr:
             best_corr, best_model, best_fold_id = corr, model, fold
 
-    print(f"✓ Best fold: {best_fold_id}  (Pearson {best_corr:.5f})")
+    print(f"Best fold: {best_fold_id}  (Pearson {best_corr:.5f})")
     return best_model
 
 
@@ -121,25 +127,31 @@ def predict(best_model, X_test):
     return best_model.predict(X_test, num_iteration=best_model.best_iteration)
 
 
-def save_submission(test_index, preds, out_path=f"{output_folder}submission_lgbm.csv"):
-    """
-    Save predictions to a CSV file for submission.
-    Args:
-        test_index (Index): Index of the test dataset.
-        preds (np.ndarray): Predictions array.
-        out_path (str): Path to save the submission file.
-    """
-    sub = pd.DataFrame({"ID": test_index, "label": preds})
-    sub.to_csv(out_path, index=False)
-    print(f"Saved predictions to {out_path}")
-
-
 def main():
-    train, test = load_data()
-    X_train, y_train, X_test = preprocess(train, test)
+    train_raw, test_raw = load_data()
+    print("Computing feature importance …")
+    imp_df = compute_feature_importance(train_raw, target_col="label", n_splits=5)
+    imp_df.to_csv(f"{output_folder}feature_importance.csv", index=False)
+    print("Top 20 features:\n", imp_df.head(20))
+    # pick N best columns for lag / roll
+    top_n = 30
+    cols_to_expand = imp_df.head(top_n)["feature"].tolist()
+    pre = Preprocessor(
+        lag_steps=[1, 5, 30],
+        rolling_windows=[5, 30, 120],
+        clip_quantiles=(0.001, 0.999),
+        expand_cols=cols_to_expand,
+        aggregate=None,
+    )
+    print("Fitting preprocessor...")
+    train = pre.fit_transform(train_raw)
+    test = pre.transform(test_raw)
+    X_train, y_train, X_test = feature_col_filter(train, test)
+    print("Data preparation is complete. Training model...")
     best_model = train_and_pick_best(X_train, y_train, n_splits=5)
+    print("Model training is complete. Making predictions...")
     preds = predict(best_model, X_test)
-    save_submission(test.index, preds)
+    save_submission(test.index, preds, out_path=f"{output_folder}submission_lgbm.csv")
 
 
 if __name__ == "__main__":
