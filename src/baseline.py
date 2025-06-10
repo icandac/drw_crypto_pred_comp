@@ -47,7 +47,7 @@ class Baseline:
             {'prediction': predictions},
             index=self.test.index
         )
-        return self.forecast
+        #return self.forecast
 
     def random(self, scale: float = 0.1, random_state: int = None) -> pd.DataFrame:
         """
@@ -79,7 +79,7 @@ class Baseline:
             {'prediction': baseline + noise.cumsum()},  # Replace with `noise` if no baseline desired
             index=self.test.index
         )
-        return self.forecast
+        #return self.forecast
         
     def drift(self) -> pd.DataFrame:
         start = float(self.training.iloc[-self.window].iloc[0])
@@ -116,13 +116,13 @@ class Baseline:
         Returns:
             pd.DataFrame: Forecast where every value is the computed mean.
         """
-        mean_val = float(self.training.iloc[-self.window:].mean())
+        mean_val = float(self.training.iloc[-self.window:].mean().iloc[0])
         predictions = np.full(len(self.test), mean_val)
         self.forecast = pd.DataFrame(
-            {'y_pred': predictions},
+            {'prediction': predictions},
             index=self.test.index
         )
-        return self.forecast
+        #return self.forecast
         
     def pearson_corr(self) -> float:
         """
@@ -135,6 +135,32 @@ class Baseline:
         y_pred = self.forecast['prediction'].reindex(y_true.index)
         return y_true.corr(y_pred)
 
+    def save_forecast(self, filename: str = 'submission.csv', 
+                      include_index: bool = True) -> None:
+        """
+        Save the forecast DataFrame to a CSV file.
+        
+        Args:
+            filename (str): Output file path (default: 'submission.csv')
+            include_index (bool): Whether to include the index in output (default: True)
+            
+        Raises:
+            AttributeError: If no forecast exists
+            ValueError: If filename is invalid
+        """
+        if not hasattr(self, 'forecast') or self.forecast is None:
+            raise AttributeError("No forecast available. Run a forecasting method first.")
+        
+        if not isinstance(filename, str) or not filename.endswith('.csv'):
+            raise ValueError("Filename must be a string ending with '.csv'")
+        
+        try:
+            self.forecast.to_csv(filename, index=include_index)
+            print(f"Successfully saved forecast to {filename}")
+        except Exception as e:
+            print(f"Failed to save forecast: {str(e)}")
+            raise
+
     def plot_forecast(self, start_date_str: str = '2024-02-29 18:00:00'):
         """
         Plot training, forecast, and test series with legend and x-axis limited from start_date.
@@ -146,9 +172,10 @@ class Baseline:
         
         fig, ax = plt.subplots(figsize=(10, 5))
         
-        self.training['label'].plot(ax=ax, label='train')
+        self.training['label'].plot(ax=ax, c='gray', ls=':',label='train', alpha=.5)
+        self.test['label'].plot(ax=ax, c='gray', ls='--', label='test', alpha=.5)
         self.forecast['prediction'].plot(ax=ax, label='forecast')
-        self.test['label'].plot(ax=ax, label='test')
+        
         
         ax.legend()
         ax.set_xlim(left=start_date)
