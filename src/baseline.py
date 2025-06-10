@@ -35,7 +35,8 @@ class Baseline:
         Returns:
             pd.DataFrame: Forecast values with index matching the test set.
         """
-        last_val = float(self.training.iloc[-1])
+        last_val = float(self.training.iloc[-1].iloc[0])
+
         noise = np.random.normal(
             loc=0.0,
             scale=noise_scale,
@@ -43,7 +44,39 @@ class Baseline:
         )
         predictions = last_val + noise
         self.forecast = pd.DataFrame(
-            {'y_pred': predictions},
+            {'prediction': predictions},
+            index=self.test.index
+        )
+        return self.forecast
+
+    def random(self, scale: float = 0.1, random_state: int = None) -> pd.DataFrame:
+        """
+        Random baseline forecast:
+        - Uses the mean of the last 'window' observations as the baseline.
+        - Adds Gaussian noise scaled by the training data's standard deviation.
+        - Sets a fixed random seed for reproducibility.
+    
+        Args:
+            scale (float): Controls noise magnitude (default: 0.1).
+            random_state (int): Seed for reproducibility (default: None).
+    
+        Returns:
+            pd.DataFrame: Forecast with columns ['y_pred'], indexed to match self.test.
+        """
+        # Set random seed if provided
+        if random_state is not None:
+            np.random.seed(random_state)
+    
+        # Baseline: Mean of the last window (ensure scalar with .item())
+        baseline = self.training.iloc[-self.window:].mean().item()
+    
+        # Noise: Scaled by training std (avoid zero with max(..., 1e-6))
+        training_std = max(self.training.iloc[-self.window:].std().item(), 1e-6)
+        noise = np.random.normal(loc=0, scale=scale * training_std, size=len(self.test))
+    
+        # Forecast: Baseline + noise (remove .cumsum() unless intentional)
+        self.forecast = pd.DataFrame(
+            {'prediction': baseline + noise.cumsum()},  # Replace with `noise` if no baseline desired
             index=self.test.index
         )
         return self.forecast
@@ -74,7 +107,7 @@ class Baseline:
         drift_values = end + slope * np.arange(1, periods + 1)
     
         # Final forecast DataFrame
-        self.forecast = pd.DataFrame({'y_pred': drift_values}, index=self.test.index)
+        self.forecast = pd.DataFrame({'prediction': drift_values}, index=self.test.index)
 
     def mean(self) -> pd.DataFrame:
         """
@@ -99,5 +132,28 @@ class Baseline:
             float: Pearson correlation coefficient.
         """
         y_true = self.test.squeeze()
-        y_pred = self.forecast['y_pred'].reindex(y_true.index)
+        y_pred = self.forecast['prediction'].reindex(y_true.index)
         return y_true.corr(y_pred)
+
+    def plot_forecast(self, start_date_str: str = '2024-02-29 18:00:00'):
+        """
+        Plot training, forecast, and test series with legend and x-axis limited from start_date.
+
+        Args:
+            start_date_str (str): Left limit of x-axis as a date string.
+        """
+        start_date = pd.to_datetime(start_date_str)
+        
+        fig, ax = plt.subplots(figsize=(10, 5))
+        
+        self.training['label'].plot(ax=ax, label='train')
+        self.forecast['prediction'].plot(ax=ax, label='forecast')
+        self.test['label'].plot(ax=ax, label='test')
+        
+        ax.legend()
+        ax.set_xlim(left=start_date)
+        ax.set_title("Training, Forecast, and Test Data")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Value")
+        
+        plt.show()
