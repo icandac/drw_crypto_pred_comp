@@ -7,7 +7,11 @@ from scipy.stats import pearsonr
 from sklearn.model_selection import TimeSeriesSplit
 
 from src.utils.light_preprocess import Preprocessor
-from src.utils.util_funcs import compute_feature_importance, save_submission
+from src.utils.util_funcs import (
+    compute_feature_importance,
+    optimize_topn_features,
+    save_submission,
+)
 
 gc.collect()
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -127,15 +131,17 @@ def predict(best_model, X_test):
     return best_model.predict(X_test, num_iteration=best_model.best_iteration)
 
 
-def main():
+def lgbm_runner():
     train_raw, test_raw = load_data()
     print("Computing feature importance …")
     imp_df = compute_feature_importance(train_raw, target_col="label", n_splits=5)
     imp_df.to_csv(f"{output_folder}feature_importance.csv", index=False)
-    print("Top 20 features:\n", imp_df.head(20))
-    # pick N best columns for lag / roll
-    top_n = 30
-    cols_to_expand = imp_df.head(top_n)["feature"].tolist()
+    # Auto-search the best Top-N
+    best_n, _ = optimize_topn_features(
+        train_raw, imp_df, top_min=10, top_max=700, n_trials=30, timeout=1800
+    )
+    cols_to_expand = imp_df.head(best_n)["feature"].tolist()
+
     pre = Preprocessor(
         lag_steps=[1, 5, 30],
         rolling_windows=[5, 30, 120],
@@ -143,16 +149,17 @@ def main():
         expand_cols=cols_to_expand,
         aggregate=None,
     )
+
     print("Fitting preprocessor...")
     train = pre.fit_transform(train_raw)
     test = pre.transform(test_raw)
+
     X_train, y_train, X_test = feature_col_filter(train, test)
-    print("Data preparation is complete. Training model...")
+
+    print("Training model...")
     best_model = train_and_pick_best(X_train, y_train, n_splits=5)
-    print("Model training is complete. Making predictions...")
+
+    print("Making predictions...")
     preds = predict(best_model, X_test)
+
     save_submission(test.index, preds, out_path=f"{output_folder}submission_lgbm.csv")
-
-
-if __name__ == "__main__":
-    main()

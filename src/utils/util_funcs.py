@@ -1,6 +1,13 @@
+import gc
+from typing import Tuple
+
 import lightgbm as lgb
+import numpy as np
+import optuna
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
+
+from src.utils.light_preprocess import Preprocessor
 
 
 def save_submission(test_index, preds, out_path):
@@ -61,8 +68,13 @@ def compute_feature_importance(
     for fold, (tr_idx, val_idx) in enumerate(tscv.split(X), 1):
         print(f"⏳  Training fold {fold}/{n_splits} …", end="\r")
 
-        tr_ds = lgb.Dataset(X.iloc[tr_idx], y.iloc[tr_idx])
-        val_ds = lgb.Dataset(X.iloc[val_idx], y.iloc[val_idx], reference=tr_ds)
+        X_tr = X.iloc[tr_idx].astype("float32")
+        y_tr = y.iloc[tr_idx]
+        X_val = X.iloc[val_idx].astype("float32")
+        y_val = y.iloc[val_idx]
+
+        tr_ds = lgb.Dataset(X_tr, y_tr, free_raw_data=False)
+        val_ds = lgb.Dataset(X_val, y_val, reference=tr_ds, free_raw_data=False)
 
         model = lgb.train(
             params,
@@ -78,6 +90,9 @@ def compute_feature_importance(
             dtype="float64",
         )
 
+        del model, tr_ds, val_ds, X_tr, X_val  # <── release memory now
+        gc.collect()
+
     imp_df = (
         imp_accum.div(n_splits)  # average across folds
         .sort_values(ascending=False)
@@ -86,3 +101,111 @@ def compute_feature_importance(
     )
 
     return imp_df
+
+
+def crossval_pearson(x, y, n_splits=5, seed=42) -> float:
+    """Return mean Pearson over TimeSeriesSplit folds."""
+    from scipy.stats import pearsonr
+    from sklearn.model_selection import TimeSeriesSplit
+
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    scores = []
+    for tr_idx, val_idx in tscv.split(x):
+        x_tr = x.iloc[tr_idx].astype("float32")
+        y_tr = y.iloc[tr_idx]
+        x_val = x.iloc[val_idx].astype("float32")
+        y_val = y.iloc[val_idx]
+
+        m = lgb.LGBMRegressor(
+            objective="regression",
+            learning_rate=0.1,
+            num_leaves=256,
+            feature_fraction=0.9,
+            bagging_fraction=0.8,
+            n_estimators=600,
+            random_state=seed,
+        )
+        m.fit(
+            x_tr,
+            y_tr,
+            eval_set=[(x_val, y_val)],
+            callbacks=[
+                lgb.early_stopping(stopping_rounds=200),
+                lgb.log_evaluation(period=0),
+            ],
+        )
+        preds = m.predict(x_val, num_iteration=m.best_iteration_)
+        scores.append(pearsonr(y_val, preds)[0])
+
+        del m, x_tr, x_val
+        gc.collect()
+
+    return float(np.mean(scores))
+
+
+def optimize_topn_features(
+    train_raw: pd.DataFrame,
+    imp_df: pd.DataFrame,
+    top_min: int = 10,
+    top_max: int = 700,
+    n_trials: int = 30,
+    timeout: int = 1800,
+    seed: int = 42,
+) -> Tuple[int, float]:
+    """
+    Use Optuna to pick the optimal `top_n` (# of most-important features
+    to expand with lags/rolls).
+
+    Args:
+        train_raw : DataFrame
+            Original training frame (features + 'label').
+        imp_df : DataFrame
+            Output of `compute_feature_importance`, already sorted desc.
+        top_min, top_max : int
+            Search range for `top_n`.
+        n_trials : int
+            Max Optuna trials.
+        timeout : int
+            Seconds; stop earlier if reached.
+        seed : int
+            Reproducibility.
+
+    Returns:
+        best_n : int
+            Chosen cut-off.
+        best_cv : float
+            Mean CV Pearson achieved with that cut-off.
+    """
+
+    def objective(trial: optuna.Trial) -> float:
+        # Suggest a cut-off (log scale samples small & large)
+        top_n = trial.suggest_int("top_n", top_min, top_max, log=True)
+        cols = imp_df.head(top_n)["feature"].tolist()
+
+        # Build pre-processor with those columns
+        pre = Preprocessor(
+            lag_steps=[1, 5, 30],
+            rolling_windows=[5, 30, 120],
+            clip_quantiles=(0.001, 0.999),
+            expand_cols=cols,
+            aggregate=None,
+        )
+        train = pre.fit_transform(train_raw)
+        X = train.drop(columns=["label"])
+        y = train["label"]
+
+        # Evaluate
+        pear = crossval_pearson(X, y, n_splits=5, seed=seed)
+        trial.set_user_attr("pearson", pear)
+        return -pear
+
+    sampler = optuna.samplers.TPESampler(seed=seed)
+    study = optuna.create_study(direction="minimize", sampler=sampler)
+    study.optimize(
+        objective, n_trials=n_trials, timeout=timeout, show_progress_bar=True
+    )
+
+    best_n = study.best_params["top_n"]
+    best_cv = -study.best_value
+    print(f"Optuna picked Top-{best_n} with CV Pearson {best_cv:.5f}")
+    return best_n, best_cv
