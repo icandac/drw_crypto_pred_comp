@@ -1,5 +1,5 @@
 import gc
-from typing import Tuple
+from typing import List, Tuple
 
 import lightgbm as lgb
 import numpy as np
@@ -23,22 +23,37 @@ def save_submission(test_index, preds, out_path):
     print(f"Saved predictions to {out_path}")
 
 
+def last_fraction(df: pd.DataFrame, frac: float = 0.1) -> pd.DataFrame:
+    """
+    Keep only the last `frac` share of rows (chronological tail).
+    Args:
+        df: pd.DataFrame
+            Dataframe that this trimming will be applied.
+        frac: float
+            Fraction of the data will stay from the end, default = 0.1
+    Returns:
+        Trimmed input dataframe.
+    """
+    if not 0 < frac <= 1:
+        raise ValueError("frac must be in (0, 1]")
+    start = int((1 - frac) * len(df))
+    return df.iloc[start:].copy()
+
+
 def variance_filter(
     df: pd.DataFrame, target_col: str = "label", thresh_ratio: float = 0.1
 ) -> pd.DataFrame:
     """
-    Remove feature columns whose variance is < `thresh_ratio` × var(label).
+    Remove feature columns whose variance is < `thresh_ratio` x var(label).
 
-    Parameters
-    ----------
-    df : DataFrame
-        Training frame (label + features).
-    thresh_ratio : float
-        Keep features whose var >= thresh_ratio * var(label).
+    Args:
+        df : DataFrame
+            Training frame (label + features).
+        thresh_ratio : float
+            Keep features whose var >= thresh_ratio * var(label).
 
-    Returns
-    -------
-    DataFrame
+    Returns:
+        DataFrame
     """
     label_var = df[target_col].var()
     thresh = label_var * thresh_ratio
@@ -49,6 +64,60 @@ def variance_filter(
     pruned = df[keep_cols].copy()
     print(f"Variance filter kept {len(keep_cols)-1} of {df.shape[1]-1} columns")
     return pruned
+
+
+def corr_cluster_select(
+    df: pd.DataFrame, target: str = "label", thresh: float = 0.90
+) -> pd.DataFrame:
+    """
+    Target-aware correlation-clustering filter.
+
+    Keeps at most **one** feature from every group of highly-correlated
+    columns (|corr| ≥ `thresh`).  For each group the survivor is the
+    feature with the strongest absolute correlation to the target.
+    Args:
+        df : DataFrame
+            Input frame that still contains `target`.
+        thresh : float
+            Absolute Pearson correlation threshold that triggers grouping
+            (default 0.90).
+    Returns:
+        DataFrame
+            Same rows, but with duplicates pruned.
+    """
+    feats = df.drop(columns=[target])
+    y = df[target]
+
+    corr = feats.astype("float32").corr().abs()
+    mask = np.triu(np.ones_like(corr, dtype=bool), k=1)
+    upper = corr.where(mask)
+
+    survivors: List[str] = []
+    processed = set()  # columns already clustered
+
+    for col in upper.columns:
+        if col in processed:
+            continue
+
+        # all features strongly correlated with `col`
+        cluster = upper.index[upper[col] >= thresh].tolist()
+        cluster.append(col)
+
+        processed.update(cluster)
+
+        # pick the column with largest |corr| to the label
+        best = feats[cluster].corrwith(y).abs().idxmax()
+        survivors.append(best)
+
+    # deduplicate while preserving order
+    survivors = list(dict.fromkeys(survivors))
+
+    kept_df = df[[target] + survivors].copy()
+    print(
+        f"Correlation filter kept {len(survivors)} "
+        f"of {feats.shape[1]} columns (thresh={thresh})"
+    )
+    return kept_df
 
 
 def compute_feature_importance(
@@ -77,8 +146,6 @@ def compute_feature_importance(
     Returns:
         DataFrame with columns [feature, importance] sorted descending.
     """
-    df = variance_filter(df, target_col, thresh_ratio=var_ratio)
-
     y = df[target_col]
     x = df.drop(columns=[target_col])
 
@@ -222,12 +289,16 @@ def optimize_topn_features(
             aggregate=None,
         )
         train = pre.fit_transform(train_raw)
-        x = train.drop(columns=["label"])
+        x = train.drop(columns=["label"]).astype("float32")
         y = train["label"]
 
         # Evaluate
         pear = crossval_pearson(x, y, n_splits=5, seed=seed)
         trial.set_user_attr("pearson", pear)
+
+        del train, x, y, pre, cols
+        gc.collect()
+
         return -pear
 
     sampler = optuna.samplers.TPESampler(seed=seed)

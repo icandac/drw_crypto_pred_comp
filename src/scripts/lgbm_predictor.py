@@ -10,7 +10,11 @@ from sklearn.model_selection import TimeSeriesSplit
 from src.utils.light_preprocess import Preprocessor
 from src.utils.util_funcs import (
     compute_feature_importance,
+    corr_cluster_select,
+    last_fraction,
+    optimize_topn_features,
     save_submission,
+    variance_filter,
 )
 
 gc.collect()
@@ -139,22 +143,25 @@ def predict(best_model, x_test):
 
 def lgbm_runner():
     train_raw, test_raw = load_data()
-    print("Computing feature importance …")
+    train_raw = last_fraction(train_raw, frac=0.10)
+    train_raw = variance_filter(train_raw)
+    train_raw = corr_cluster_select(train_raw)
+    print("Computing feature importance ...")
 
     imp_df = compute_feature_importance(
         train_raw, target_col="label", n_splits=5, var_ratio=0.1
     )
     imp_df.to_csv(f"{output_folder}feature_importance.csv", index=False)
-    # # Open the following row to auto-search the best Top-N
-    # best_n, _ = optimize_topn_features(
-    #     train_raw, imp_df, top_min=10, top_max=700, n_trials=30, timeout=1800
-    # )
-    # cols_to_expand = imp_df.head(best_n)["feature"].tolist()
-    # print(f"Top {len(best_n)} features:\n", imp_df.head(len(best_n)))
-    top_n = 48
-    print(f"Top {top_n} features:\n", imp_df.head(int(top_n)))
+    # Open the following row to auto-search the best Top-N
+    best_n, _ = optimize_topn_features(
+        train_raw, imp_df, top_min=10, top_max=700, n_trials=30, timeout=1800
+    )
+    cols_to_expand = imp_df.head(best_n)["feature"].tolist()
+    print(f"Top {len(cols_to_expand)} features:\n", imp_df.head(best_n))
+    # top_n = 48
+    # print(f"Top {top_n} features:\n", imp_df.head(int(top_n)))
     # pick N best columns for lag / roll
-    cols_to_expand = imp_df.head(top_n)["feature"].tolist()
+    # cols_to_expand = imp_df.head(top_n)["feature"].tolist()
     train_reduced = train_raw[["label", *cols_to_expand]].copy()
     test_reduced = test_raw[cols_to_expand].copy()
 
