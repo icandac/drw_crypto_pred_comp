@@ -23,12 +23,41 @@ def save_submission(test_index, preds, out_path):
     print(f"Saved predictions to {out_path}")
 
 
+def variance_filter(
+    df: pd.DataFrame, target_col: str = "label", thresh_ratio: float = 0.1
+) -> pd.DataFrame:
+    """
+    Remove feature columns whose variance is < `thresh_ratio` × var(label).
+
+    Parameters
+    ----------
+    df : DataFrame
+        Training frame (label + features).
+    thresh_ratio : float
+        Keep features whose var >= thresh_ratio * var(label).
+
+    Returns
+    -------
+    DataFrame
+    """
+    label_var = df[target_col].var()
+    thresh = label_var * thresh_ratio
+
+    keep_cols = [target_col] + [
+        c for c in df.columns if c != target_col and df[c].var() >= thresh
+    ]
+    pruned = df[keep_cols].copy()
+    print(f"Variance filter kept {len(keep_cols)-1} of {df.shape[1]-1} columns")
+    return pruned
+
+
 def compute_feature_importance(
     df: pd.DataFrame,
     target_col: str = "label",
     n_splits: int = 5,
     seed: int = 42,
-    importance_type: str = "gain",  # "gain" or "split"
+    importance_type: str = "gain",  # "gain" or "split",
+    var_ratio: float = 0.1,
 ) -> pd.DataFrame:
     """
     Train LightGBM on each fold, average feature importances, and
@@ -48,15 +77,17 @@ def compute_feature_importance(
     Returns:
         DataFrame with columns [feature, importance] sorted descending.
     """
+    df = variance_filter(df, target_col, thresh_ratio=var_ratio)
+
     y = df[target_col]
-    X = df.drop(columns=[target_col])
+    x = df.drop(columns=[target_col])
 
     tscv = TimeSeriesSplit(n_splits=n_splits)
-    imp_accum = pd.Series(0.0, index=X.columns)
+    imp_accum = pd.Series(0.0, index=x.columns)
 
     params = dict(
         objective="regression",
-        learning_rate=0.05,
+        learning_rate=0.1,
         num_leaves=256,
         feature_fraction=0.9,
         bagging_fraction=0.8,
@@ -65,36 +96,36 @@ def compute_feature_importance(
         verbose=-1,
     )
 
-    for fold, (tr_idx, val_idx) in enumerate(tscv.split(X), 1):
-        print(f"⏳  Training fold {fold}/{n_splits} …", end="\r")
+    for fold, (tr_idx, val_idx) in enumerate(tscv.split(x), 1):
+        print(f"Training fold {fold}/{n_splits} …", end="\r")
 
-        X_tr = X.iloc[tr_idx].astype("float32")
+        x_tr = x.iloc[tr_idx].astype("float32")
         y_tr = y.iloc[tr_idx]
-        X_val = X.iloc[val_idx].astype("float32")
+        x_val = x.iloc[val_idx].astype("float32")
         y_val = y.iloc[val_idx]
 
-        tr_ds = lgb.Dataset(X_tr, y_tr, free_raw_data=False)
-        val_ds = lgb.Dataset(X_val, y_val, reference=tr_ds, free_raw_data=False)
+        tr_ds = lgb.Dataset(x_tr, y_tr, free_raw_data=False)
+        val_ds = lgb.Dataset(x_val, y_val, reference=tr_ds, free_raw_data=False)
 
         model = lgb.train(
             params,
             tr_ds,
-            num_boost_round=4000,
+            num_boost_round=1000,
             valid_sets=[val_ds],
             callbacks=[lgb.early_stopping(200)],
         )
 
         imp_accum += pd.Series(
             model.feature_importance(importance_type=importance_type),
-            index=X.columns,
+            index=x.columns,
             dtype="float64",
         )
 
-        del model, tr_ds, val_ds, X_tr, X_val  # <── release memory now
+        del model, tr_ds, val_ds, x_tr, x_val  # <── release memory now
         gc.collect()
 
     imp_df = (
-        imp_accum.div(n_splits)  # average across folds
+        imp_accum.div(n_splits)
         .sort_values(ascending=False)
         .reset_index()
         .rename(columns={"index": "feature", 0: "importance"})
@@ -191,11 +222,11 @@ def optimize_topn_features(
             aggregate=None,
         )
         train = pre.fit_transform(train_raw)
-        X = train.drop(columns=["label"])
+        x = train.drop(columns=["label"])
         y = train["label"]
 
         # Evaluate
-        pear = crossval_pearson(X, y, n_splits=5, seed=seed)
+        pear = crossval_pearson(x, y, n_splits=5, seed=seed)
         trial.set_user_attr("pearson", pear)
         return -pear
 

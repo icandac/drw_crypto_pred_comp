@@ -2,6 +2,7 @@ import gc
 import warnings
 
 import lightgbm as lgb
+import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
 from sklearn.model_selection import TimeSeriesSplit
@@ -9,11 +10,11 @@ from sklearn.model_selection import TimeSeriesSplit
 from src.utils.light_preprocess import Preprocessor
 from src.utils.util_funcs import (
     compute_feature_importance,
-    optimize_topn_features,
     save_submission,
 )
 
 gc.collect()
+np.seterr(invalid="ignore")
 warnings.filterwarnings("ignore", category=UserWarning)
 
 seed = 42
@@ -35,6 +36,11 @@ def load_data(
     """
     train = pd.read_parquet(train_path)
     test = pd.read_parquet(test_path)
+    # print(len(train), len(test))
+
+    # train = train[int(len(train)):]
+    # test = test[int(len(test)):]
+    # print(len(train), len(test))
     return train, test
 
 
@@ -45,7 +51,7 @@ def feature_col_filter(train, test):
         train (DataFrame): Training dataset.
         test (DataFrame): Test dataset.
     Returns:
-        tuple: (X_train DataFrame, y_train Series, X_test DataFrame)
+        tuple: (x_train DataFrame, y_train Series, x_test DataFrame)
     """
     # Ensure timestamp index is sorted (important for TSCV)
     if isinstance(train.index, pd.DatetimeIndex):
@@ -53,18 +59,18 @@ def feature_col_filter(train, test):
 
     # Align feature columns between train & test
     feature_cols = [c for c in train.columns if c != "label"]
-    X_train = train[feature_cols]
+    x_train = train[feature_cols]
     y_train = train["label"]
-    X_test = test[feature_cols]
-    return X_train, y_train, X_test
+    x_test = test[feature_cols]
+    return x_train, y_train, x_test
 
 
-def train_and_pick_best(X, y, n_splits=5):
+def train_and_pick_best(x, y, n_splits=5):
     """
     Train LightGBM models using Time Series Cross-Validation and pick the
     best model based on Pearson correlation.
     Args:
-        X (DataFrame): Feature DataFrame.
+        x (DataFrame): Feature DataFrame.
         y (Series): Target variable.
         n_splits (int): Number of splits for Time Series Cross-Validation.
     Returns:
@@ -89,12 +95,12 @@ def train_and_pick_best(X, y, n_splits=5):
         "verbose": -1,
     }
 
-    for fold, (train_idx, val_idx) in enumerate(tscv.split(X), 1):
-        X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
+    for fold, (train_idx, val_idx) in enumerate(tscv.split(x), 1):
+        x_tr, x_val = x.iloc[train_idx], x.iloc[val_idx]
         y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-        tr_ds = lgb.Dataset(X_tr, y_tr, free_raw_data=False)
-        val_ds = lgb.Dataset(X_val, y_val, reference=tr_ds, free_raw_data=False)
+        tr_ds = lgb.Dataset(x_tr, y_tr, free_raw_data=False)
+        val_ds = lgb.Dataset(x_val, y_val, reference=tr_ds, free_raw_data=False)
 
         model = lgb.train(
             lgb_params,
@@ -108,9 +114,9 @@ def train_and_pick_best(X, y, n_splits=5):
             ],
         )
 
-        val_pred = model.predict(X_val, num_iteration=model.best_iteration)
+        val_pred = model.predict(x_val, num_iteration=model.best_iteration)
         corr, _ = pearsonr(y_val, val_pred)
-        print(f"Fold {fold}/{n_splits} – Pearson = {corr:.5f}")
+        print(f"Fold {fold}/{n_splits} - Pearson = {corr:.5f}")
 
         if corr > best_corr:
             best_corr, best_model, best_fold_id = corr, model, fold
@@ -119,47 +125,57 @@ def train_and_pick_best(X, y, n_splits=5):
     return best_model
 
 
-def predict(best_model, X_test):
+def predict(best_model, x_test):
     """
     Make predictions using the trained models.
     Args:
         models (list): List of trained LightGBM models.
-        X_test (DataFrame): Test feature DataFrame.
+        x_test (DataFrame): Test feature DataFrame.
     Returns:
         np.ndarray: Average predictions from all models.
     """
-    return best_model.predict(X_test, num_iteration=best_model.best_iteration)
+    return best_model.predict(x_test, num_iteration=best_model.best_iteration)
 
 
 def lgbm_runner():
     train_raw, test_raw = load_data()
     print("Computing feature importance …")
-    imp_df = compute_feature_importance(train_raw, target_col="label", n_splits=5)
-    imp_df.to_csv(f"{output_folder}feature_importance.csv", index=False)
-    # Auto-search the best Top-N
-    best_n, _ = optimize_topn_features(
-        train_raw, imp_df, top_min=10, top_max=700, n_trials=30, timeout=1800
+
+    imp_df = compute_feature_importance(
+        train_raw, target_col="label", n_splits=5, var_ratio=0.1
     )
-    cols_to_expand = imp_df.head(best_n)["feature"].tolist()
+    imp_df.to_csv(f"{output_folder}feature_importance.csv", index=False)
+    # # Open the following row to auto-search the best Top-N
+    # best_n, _ = optimize_topn_features(
+    #     train_raw, imp_df, top_min=10, top_max=700, n_trials=30, timeout=1800
+    # )
+    # cols_to_expand = imp_df.head(best_n)["feature"].tolist()
+    # print(f"Top {len(best_n)} features:\n", imp_df.head(len(best_n)))
+    top_n = 48
+    print(f"Top {top_n} features:\n", imp_df.head(int(top_n)))
+    # pick N best columns for lag / roll
+    cols_to_expand = imp_df.head(top_n)["feature"].tolist()
+    train_reduced = train_raw[["label", *cols_to_expand]].copy()
+    test_reduced = test_raw[cols_to_expand].copy()
 
     pre = Preprocessor(
         lag_steps=[1, 5, 30],
-        rolling_windows=[5, 30, 120],
+        rolling_windows=[5, 30, 60, 120, 1440],
         clip_quantiles=(0.001, 0.999),
         expand_cols=cols_to_expand,
         aggregate=None,
     )
 
     print("Fitting preprocessor...")
-    train = pre.fit_transform(train_raw)
-    test = pre.transform(test_raw)
+    train = pre.fit_transform(train_reduced)
+    test = pre.transform(test_reduced)
 
-    X_train, y_train, X_test = feature_col_filter(train, test)
+    x_train, y_train, x_test = feature_col_filter(train, test)
 
     print("Training model...")
-    best_model = train_and_pick_best(X_train, y_train, n_splits=5)
+    best_model = train_and_pick_best(x_train, y_train, n_splits=5)
 
     print("Making predictions...")
-    preds = predict(best_model, X_test)
+    preds = predict(best_model, x_test)
 
     save_submission(test.index, preds, out_path=f"{output_folder}submission_lgbm.csv")
