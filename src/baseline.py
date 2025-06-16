@@ -1,4 +1,3 @@
-from typing import List
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -15,12 +14,7 @@ class Baseline:
         forecast (pd.DataFrame): Container for forecasted values.
     """
 
-    def __init__(
-        self,
-        training: pd.Series,
-        test: pd.Series,
-        window: int = 1
-    ) -> None:
+    def __init__(self, training: pd.Series, test: pd.Series, window: int = 1) -> None:
         self.training = training
         self.test = test
         self.window = window
@@ -49,11 +43,11 @@ class Baseline:
         - Uses the mean of the last 'window' observations as the baseline.
         - Adds Gaussian noise scaled by the training data's standard deviation.
         - Sets a fixed random seed for reproducibility.
-    
+
         Args:
             scale (float): Controls noise magnitude (default: 0.1).
             random_state (int): Seed for reproducibility (default: None).
-    
+
         Returns:
             pd.DataFrame: Forecast with columns ['y_pred'], indexed to match self.test.
         """
