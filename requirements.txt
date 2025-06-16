@@ -1,4 +1,3 @@
--e file:///Users/csagdic/Documents/algo-trading/drw_crypto_pred_comp
 alembic==1.16.1
 anyio==4.9.0
 appnope==0.1.4
