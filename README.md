@@ -61,6 +61,21 @@ Now you can just do ./git-auto.sh to push commits.
 
 The data is [`here`](https://www.kaggle.com/competitions/drw-crypto-market-prediction/data). You should download data and place it to a folder called 'data' in the parent folder in order to have no errors raising due to the data paths.
 
+### 8. Run the code
+
+The new methods of predictions should be placed under src/scripts whereas the utility functions and classes should be under src/utils. Somewhere in your method, there should be a runner function. Then, please put the name of that function into src/main.py as below, 
+
+```bash
+if __name__ == "__main__":
+    lgbm_predictor.lgbm_runner()
+```
+
+then run 
+
+```bash
+python3 src/main.py
+```
+
 ## Goal  
 
 In this competition, the aim is to build a model capable of predicting short-term crypto future price movements using our production feature data alongside publicly available market volume statistics. 

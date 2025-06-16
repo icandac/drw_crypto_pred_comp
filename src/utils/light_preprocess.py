@@ -44,58 +44,72 @@ class Preprocessor:
         feats = [c for c in df.columns if c != "label"]
         self._base_cols = feats
         qlo, qhi = self.clip_quantiles
-        for c in feats:
-            lo, hi = df[c].quantile([qlo, qhi])
-            self._clip_bounds[c] = (lo, hi)
-            self._medians[c] = df[c].median()
+        q = df[feats].quantile([qlo, qhi])
+        self._clip_bounds = dict(zip(feats, zip(q.loc[qlo], q.loc[qhi])))
+        self._medians = df[feats].median().to_dict()
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        # start with base features in float32 to halve RAM
         out = df.copy()
+        out[self._base_cols] = out[self._base_cols].astype("float32")
 
-        # --- clipping ---
-        for c in self._base_cols:
-            lo, hi = self._clip_bounds[c]
-            out[c] = out[c].clip(lo, hi)
+        # --- clipping & NaN fill vectorised ---
+        for c, (lo, hi) in self._clip_bounds.items():
+            col = out[c].clip(lo, hi)
+            col = col.ffill().bfill().fillna(self._medians[c])
+            out[c] = col
 
-        # --- NaN filling ---
-        out[self._base_cols] = out[self._base_cols].ffill().bfill()
-        for c in self._base_cols:
-            out[c] = out[c].fillna(self._medians[c])
-
-        # choose columns to expand
         expand = self.expand_cols or self._base_cols
+        pieces = [out]  # list of frames to concat later
 
         # --- lags ---
         for lag in self.lag_steps:
-            shifted = out[expand].shift(lag).astype("float32")
+            shifted = out[expand].shift(lag)
             if self.aggregate:
-                out[f"lag{lag}_{self.aggregate}"] = shifted.aggregate(
-                    self.aggregate, axis=1
+                pieces.append(
+                    shifted.aggregate(self.aggregate, axis=1)
+                    .rename(f"lag{lag}_{self.aggregate}")
+                    .to_frame()
+                    .astype("float32")
                 )
             else:
                 shifted.columns = [f"{c}_lag{lag}" for c in shifted]
-                out = out.join(shifted)
+                pieces.append(shifted.astype("float32"))
+                del shifted
 
         # --- rolling ---
         for win in self.rolling_windows:
             roll = out[expand].rolling(win, min_periods=1)
             if self.aggregate:
-                out[f"roll_mean{win}"] = roll.mean().astype("float32").mean(axis=1)
-                out[f"roll_std{win}"] = roll.std().astype("float32").mean(axis=1)
+                pieces.append(
+                    roll.mean()
+                    .mean(axis=1)
+                    .rename(f"roll_mean{win}")
+                    .to_frame()
+                    .astype("float32")
+                )
+                pieces.append(
+                    roll.std()
+                    .mean(axis=1)
+                    .rename(f"roll_std{win}")
+                    .to_frame()
+                    .astype("float32")
+                )
             else:
-                out = out.join(roll.mean().astype("float32").add_suffix(f"_mean{win}"))
-                out = out.join(roll.std().astype("float32").add_suffix(f"_std{win}"))
+                pieces.append(roll.mean().add_suffix(f"_mean{win}").astype("float32"))
+                pieces.append(roll.std().add_suffix(f"_std{win}").astype("float32"))
 
-        # --- order-book imbalance ---
+        # --- imbalance ---
         if self.add_imbalance and all(c in out.columns for c in self.orderbook_cols):
             bid, ask = self.orderbook_cols
-            denom = (out[bid] + out[ask]).replace(0, np.nan)
-            out["orderbook_imbalance"] = (
-                ((out[bid] - out[ask]) / denom).fillna(0).astype("float32")
-            )
+            denom = (out[bid] + out[ask]).replace(0.0, np.nan)
+            imb = ((out[bid] - out[ask]) / denom).fillna(0).astype("float32")
+            pieces.append(imb.rename("orderbook_imbalance").to_frame())
 
-        return out
+        # concat ONCE
+        final = pd.concat(pieces, axis=1)
+        return final
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.fit(df).transform(df)

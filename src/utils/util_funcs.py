@@ -5,6 +5,7 @@ import lightgbm as lgb
 import numpy as np
 import optuna
 import pandas as pd
+from scipy.stats import pearsonr
 from sklearn.model_selection import TimeSeriesSplit
 
 from src.utils.light_preprocess import Preprocessor
@@ -18,7 +19,8 @@ def save_submission(test_index, preds, out_path):
         preds (np.ndarray): Predictions array.
         out_path (str): Path to save the submission file.
     """
-    sub = pd.DataFrame({"ID": test_index, "label": preds})
+    sub = pd.DataFrame({"ID": test_index, "prediction": preds})
+    sub = sub.sort_values("ID")
     sub.to_csv(out_path, index=False)
     print(f"Saved predictions to {out_path}")
 
@@ -311,3 +313,48 @@ def optimize_topn_features(
     best_cv = -study.best_value
     print(f"Optuna picked Top-{best_n} with CV Pearson {best_cv:.5f}")
     return best_n, best_cv
+
+
+def oof_pearson(x, y, n_splits=5, seed=42):
+    """
+    Return the single Pearson correlation across the entire training
+    set, using out-of-fold predictions (TimeSeriesSplit).
+    """
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    oof_pred = np.full(len(y), np.nan, dtype=np.float32)
+
+    params = dict(
+        objective="regression",
+        learning_rate=0.05,
+        num_leaves=256,
+        feature_fraction=0.9,
+        bagging_fraction=0.8,
+        bagging_freq=1,
+        seed=seed,
+        verbose=-1,
+    )
+
+    for tr_idx, val_idx in tscv.split(x):
+        x_tr = x.iloc[tr_idx].astype("float32")
+        y_tr = y.iloc[tr_idx]
+        x_val = x.iloc[val_idx].astype("float32")
+
+        model = lgb.LGBMRegressor(**params, n_estimators=10_000)
+        model.fit(
+            x_tr,
+            y_tr,
+            eval_set=[(x_val, y.iloc[val_idx])],
+            callbacks=[
+                lgb.early_stopping(stopping_rounds=200),
+                lgb.log_evaluation(period=0),
+            ],
+        )
+        oof_pred[val_idx] = model.predict(x_val, num_iteration=model.best_iteration_)
+
+        # housekeeping – free RAM
+        del model, x_tr, x_val
+        gc.collect()
+
+    mask = ~np.isnan(oof_pred)  # rows actually predicted
+
+    return pearsonr(y.iloc[mask], oof_pred[mask])[0]
