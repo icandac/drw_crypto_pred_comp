@@ -56,27 +56,6 @@ def load_data(
     return train, test
 
 
-def feature_col_filter(train, test):
-    """
-    Preprocess the training and test datasets.
-    Args:
-        train (DataFrame): Training dataset.
-        test (DataFrame): Test dataset.
-    Returns:
-        tuple: (x_train DataFrame, y_train Series, x_test DataFrame)
-    """
-    # Ensure timestamp index is sorted (important for TSCV)
-    if isinstance(train.index, pd.DatetimeIndex):
-        train = train.sort_index()
-
-    # Align feature columns between train & test
-    feature_cols = [c for c in train.columns if c != "label"]
-    x_train = train[feature_cols]
-    y_train = train["label"]
-    x_test = test[feature_cols]
-    return x_train, y_train, x_test
-
-
 def train_and_pick_best(x, y, n_splits=5):
     """
     Train LightGBM models using Time Series Cross-Validation and pick the
@@ -159,7 +138,7 @@ def lgbm_runner():
     gc.collect()
     print(f"Memory starting the run:  {mem_mb():,.0f} MB")
     train_raw, test_raw = load_data()
-    train_raw = last_fraction(train_raw, frac=0.10)
+    train_raw = last_fraction(train_raw, frac=0.30)
     train_raw = variance_filter(train_raw)
     train_raw = corr_cluster_select(train_raw)
     print("Computing feature importance ...")
@@ -174,6 +153,7 @@ def lgbm_runner():
     # )
     # cols_to_expand = imp_df.head(best_n)["feature"].tolist()
     # print(f"Top {len(cols_to_expand)} features:\n", imp_df.head(best_n))
+    # imp_df = pd.read_csv(f"{output_folder}feature_importance.csv")
     top_n = 48  # determined by optimize_topn_features with optuna method
     print(f"Top {top_n} features:\n", imp_df.head(int(top_n)))
     # pick N best columns for lag / roll
